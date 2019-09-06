@@ -11,6 +11,8 @@ require (
 	github.com/gogo/protobuf v1.1.1
 	github.com/jackc/pgx v3.5.0+incompatible
 	github.com/konsorten/go-windows-terminal-sequences v1.0.2 // indirect
+	github.com/minio/minio-go v6.0.14+incompatible
+	github.com/minio/minio-go/v6 v6.0.34
 	github.com/pkg/errors v0.8.1
 	github.com/ryanbradynd05/go-tmdb v0.0.0-20190901200645-e8dd22863620 // indirect
 	github.com/sirupsen/logrus v1.4.2

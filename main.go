@@ -1,9 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -11,6 +14,7 @@ import (
 	"github.com/gofrs/uuid"
 	"github.com/gogo/protobuf/proto"
 	"github.com/jackc/pgx"
+	"github.com/minio/minio-go/v6"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"github.com/tritonmedia/identifier/pkg/rabbitmq"
@@ -20,9 +24,6 @@ import (
 const (
 	// BucketName is the bucket to read files from
 	BucketName = "triton-media"
-
-	// BucketEndpoint is the bucket endpoint to read files from
-	BucketEndpoint = "http://127.0.0.1:9000"
 
 	// TrelloBoard is the board to read from
 	TrelloBoard = "5a65133a4c47f638cd4ff1e8"
@@ -34,6 +35,7 @@ const (
 var trelloClient *trello.Client
 var pgClient *pgx.ConnPool
 var urlParseRegex = regexp.MustCompile(`\[(\w+)\]\((.+)\)`)
+var fileParseRegex = regexp.MustCompile(`S(\d+)E(\d+)`)
 var amqpClient *rabbitmq.Client
 
 func init() {
@@ -106,6 +108,119 @@ func insertCard(c *trello.Card, metadataID string,
 			($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 	`, id.String(), c.Name, 1, c.ID, mediaType, source, sourceURI, metadataID, metadataProvider, 5)
 	return id.String(), err
+}
+
+// findEpisodes scans S3 to find episodes and extract information to mimic what Twilight would send
+// to identifier
+func findEpisodes(mediaType api.Media_MediaType, mediaID string, mediaName string) error {
+	var ssl bool
+	u, err := url.Parse(os.Getenv("S3_ENDPOINT"))
+	if err != nil {
+		return errors.Wrap(err, "failed to parse minio endpoint")
+	}
+
+	if u.Scheme == "https" {
+		ssl = true
+	}
+
+	m, err := minio.New(
+		u.Host,
+		os.Getenv("S3_ACCESS_KEY"),
+		os.Getenv("S3_SECRET_KEY"),
+		ssl,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Create a done channel to control 'ListObjects' go routine.
+	doneCh := make(chan struct{})
+
+	// Indicate to our routine to exit cleanly upon return.
+	defer close(doneCh)
+
+	mediaTypeStr := mediaType.String()
+	if mediaType == api.Media_MOVIE {
+		// HACK: This fixes the disparity in libraries for TRITON only
+		mediaTypeStr = "movies"
+	}
+
+	files := make([]api.IdentifyNewFile, 0)
+
+	key := fmt.Sprintf("%s/%s", strings.ToLower(mediaTypeStr), mediaName)
+	log.Infof("searching for media files for '%s' in '%s'", mediaName, key)
+	objectCh := m.ListObjects(BucketName, key, true, doneCh)
+	for object := range objectCh {
+		if object.Err != nil {
+			log.Errorf("failed to read objects: %v", err)
+			break
+		}
+
+		// TODO(jaredallard): assumes mkv
+		if !strings.HasSuffix(object.Key, ".mkv") {
+			continue
+		}
+
+		var season int
+		var episode int
+		if mediaType != api.Media_MOVIE {
+			matches := fileParseRegex.FindStringSubmatch(object.Key)
+			if len(matches) < 3 {
+				continue
+			}
+
+			season, err = strconv.Atoi(matches[1])
+			if err != nil {
+				continue
+			}
+			episode, err = strconv.Atoi(matches[2])
+			if err != nil {
+				continue
+			}
+		} else {
+			// Special handling
+			season = 0
+			episode = 0
+		}
+
+		log.Infof("found season %d episode %d in '%s'", season, episode, filepath.Base(object.Key))
+		files = append(files, api.IdentifyNewFile{
+			CreatedAt: time.Now().Format(time.RFC3339),
+
+			// TODO(jaredallard): both twilight and us need to do a better job at this
+			Media: &api.Media{
+				Id:   mediaID,
+				Type: mediaType,
+			},
+
+			Key:     object.Key,
+			Episode: int64(episode),
+			Season:  int64(season),
+		})
+
+		if mediaType == api.Media_MOVIE {
+			break
+		}
+	}
+
+	if len(files) == 0 {
+		return fmt.Errorf("failed to find any media files")
+	}
+
+	for _, f := range files {
+		b, err := proto.Marshal(&f)
+		if err != nil {
+			log.Errorf("failed to create protobuf encoded message for identifier.newfile: %v", err)
+			continue
+		}
+
+		if err := amqpClient.Publish("v1.identify.newfile", b); err != nil {
+			log.Errorf("failed to publish message to rabbitmq: %v", err)
+			continue
+		}
+	}
+
+	return nil
 }
 
 func main() {
@@ -196,31 +311,35 @@ func main() {
 			continue
 		}
 
-		_ = id
+		/*
+			i := api.Identify{
+				CreatedAt: time.Now().Format(time.RFC3339),
+				Media: &api.Media{
+					Id:         id,
+					Type:       mediaType,
+					Metadata:   metadataProviderName,
+					MetadataId: metadataID,
+					Creator:    api.Media_TRELLO,
+					CreatorId:  c.ID,
+					Source:     sourceType,
+					SourceURI:  sourceURI,
+					Status:     0,
+				},
+			}
+			b, err := proto.Marshal(&i)
+			if err != nil {
+				log.Errorf("failed to create protobuf encoded message for identifier: %v", err)
+				continue
+			}
 
-		i := api.Identify{
-			CreatedAt: time.Now().Format(time.RFC3339),
-			Media: &api.Media{
-				Id:         id,
-				Type:       mediaType,
-				Metadata:   metadataProviderName,
-				MetadataId: metadataID,
-				Creator:    api.Media_TRELLO,
-				CreatorId:  c.ID,
-				Source:     sourceType,
-				SourceURI:  sourceURI,
-				Status:     0,
-			},
-		}
-		b, err := proto.Marshal(&i)
-		if err != nil {
-			log.Errorf("failed to create protobuf encoded message for identifier: %v", err)
-			continue
-		}
+			if err := amqpClient.Publish("v1.identify", b); err != nil {
+				log.Errorf("failed to publish message to rabbitmq: %v", err)
+				continue
+			}
+		*/
 
-		if err := amqpClient.Publish("v1.identify", b); err != nil {
-			log.Errorf("failed to publish message to rabbitmq: %v", err)
-			continue
+		if err := findEpisodes(mediaType, id, c.Name); err != nil {
+			log.Errorf("failed to find existing episodes for this media: %v", err)
 		}
 	}
 }
