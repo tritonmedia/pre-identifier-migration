@@ -194,6 +194,7 @@ func findEpisodes(mediaType api.Media_MediaType, mediaID string, mediaName strin
 			},
 
 			Key:     object.Key,
+			Quality: "1080p",
 			Episode: int64(episode),
 			Season:  int64(season),
 		})
@@ -311,32 +312,30 @@ func main() {
 			continue
 		}
 
-		/*
-			i := api.Identify{
-				CreatedAt: time.Now().Format(time.RFC3339),
-				Media: &api.Media{
-					Id:         id,
-					Type:       mediaType,
-					Metadata:   metadataProviderName,
-					MetadataId: metadataID,
-					Creator:    api.Media_TRELLO,
-					CreatorId:  c.ID,
-					Source:     sourceType,
-					SourceURI:  sourceURI,
-					Status:     0,
-				},
-			}
-			b, err := proto.Marshal(&i)
-			if err != nil {
-				log.Errorf("failed to create protobuf encoded message for identifier: %v", err)
-				continue
-			}
+		i := api.Identify{
+			CreatedAt: time.Now().Format(time.RFC3339),
+			Media: &api.Media{
+				Id:         id,
+				Type:       mediaType,
+				Metadata:   metadataProviderName,
+				MetadataId: metadataID,
+				Creator:    api.Media_TRELLO,
+				CreatorId:  c.ID,
+				Source:     sourceType,
+				SourceURI:  sourceURI,
+				Status:     0,
+			},
+		}
+		b, err := proto.Marshal(&i)
+		if err != nil {
+			log.Errorf("failed to create protobuf encoded message for identifier: %v", err)
+			continue
+		}
 
-			if err := amqpClient.Publish("v1.identify", b); err != nil {
-				log.Errorf("failed to publish message to rabbitmq: %v", err)
-				continue
-			}
-		*/
+		if err := amqpClient.Publish("v1.identify", b); err != nil {
+			log.Errorf("failed to publish message to rabbitmq: %v", err)
+			continue
+		}
 
 		if err := findEpisodes(mediaType, id, c.Name); err != nil {
 			log.Errorf("failed to find existing episodes for this media: %v", err)
